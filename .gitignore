@@ -3,6 +3,9 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
+# Claude Code session data
+.claude/
+
 # User-specific files
 *.rsuser
 *.suo
@@ -21,6 +24,7 @@ mono_crash.*
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/
+!release/
 x64/
 x86/
 [Ww][Ii][Nn]32/

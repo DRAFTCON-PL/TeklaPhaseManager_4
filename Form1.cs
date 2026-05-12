@@ -5,7 +5,7 @@ using System.Drawing.Drawing2D;
 using System.Text;
 using System.Linq;
 using System.Collections.Generic;
-using Tasks = System.Threading.Tasks;
+using System.Threading;
 using System.Windows.Forms;
 using Tekla.Structures.Model;
 
@@ -13,15 +13,20 @@ namespace TeklaPhaseManager_4
 {
     public partial class Form1 : Form
     {
-        // ── Dark theme palette ──────────────────────────────────────────────
-        private static readonly Color _darkBg       = Color.FromArgb(45,  45,  48);
-        private static readonly Color _darkSurface  = Color.FromArgb(62,  62,  66);
-        private static readonly Color _darkText     = Color.FromArgb(240, 240, 240);
-        private static readonly Color _darkAccent   = Color.FromArgb(0,   122, 204);
-        private static readonly Color _darkListBg   = Color.FromArgb(37,  37,  38);
-        private static readonly Color _darkListAlt  = Color.FromArgb(45,  45,  47);
-        private static readonly Color _darkBorder   = Color.FromArgb(80,  80,  80);
-        private static readonly Color _darkSubText  = Color.FromArgb(160, 160, 160);
+        // ── UI palette (Windows light) ───────────────────────────────────────
+        private static readonly Color DkFormBg   = Color.FromArgb(243, 243, 243);
+        private static readonly Color DkListBg   = Color.FromArgb(255, 255, 255);
+        private static readonly Color DkListAlt  = Color.FromArgb(248, 248, 248);
+        private static readonly Color DkListHdr  = Color.FromArgb(235, 235, 235);
+        private static readonly Color DkListSel  = Color.FromArgb(204, 228, 247);
+        private static readonly Color DkGrid     = Color.FromArgb(220, 220, 220);
+        private static readonly Color DkText     = Color.FromArgb(15,  15,  15);
+        private static readonly Color DkTextDim  = Color.FromArgb(110, 110, 110);
+        private static readonly Color DkBtnBg    = Color.FromArgb(225, 225, 225);
+        private static readonly Color DkBtnAccent= Color.FromArgb(0,   120, 212);
+        private static readonly Color DkBorder   = Color.FromArgb(180, 180, 180);
+        private static readonly Color DkStatusBg = Color.FromArgb(235, 235, 235);
+        private static readonly Color DkCtxBg    = Color.FromArgb(255, 255, 255);
 
         // ── Tekla colour palette ────────────────────────────────────────────
         private readonly Color[] _teklaColors = new Color[]
@@ -32,31 +37,35 @@ namespace TeklaPhaseManager_4
         };
 
         // ── Transparency labels / mapping ───────────────────────────────────
-        private static readonly string[] _transLabels = { "jak jest", "widoczne", "50%", "70%", "90%", "ukryty" };
+        private static readonly string[] _transLabels = { "as is", "visible", "50%", "70%", "90%", "hidden" };
         private static readonly Dictionary<string, int> _transLabelToRepVal = new Dictionary<string, int>
         {
-            { "jak jest", 10 }, { "widoczne", 10 }, { "50%", 5 }, { "70%", 3 }, { "90%", 1 }, { "ukryty", 0 }
+            { "as is", 10 }, { "visible", 10 }, { "50%", 5 }, { "70%", 3 }, { "90%", 1 }, { "hidden", 0 }
         };
 
         // ── State ───────────────────────────────────────────────────────────
         private Model    _model;
         private TextBox  _cellEditor;
         private ListViewItem _editingItem;
-        private int      _editingColumn           = -1;
+        private int      _editingColumn              = -1;
         private int      _editingOriginalPhaseNumber = -1;
 
         private readonly List<ListViewItem> _allItems = new List<ListViewItem>();
-        private const    string FilterPlaceholder = "Szukaj fazy...";
-        private          string _filterText       = "";
+        private const    string FilterPlaceholder    = "Search phases...";
+        private          string _filterText          = "";
 
         private int       _sortColumn = -1;
         private SortOrder _sortOrder  = SortOrder.None;
+
+        private int    _activePhaseNumber = -1;
+        private string _currentPresetPath = "";
+
+        private System.Windows.Forms.Timer _phaseTimer;
 
         // ── Constructor ─────────────────────────────────────────────────────
         public Form1()
         {
             InitializeComponent();
-            ApplyDarkTheme();
 
             this.TopMost = true;
             UpdatePinButtonAppearance();
@@ -67,77 +76,98 @@ namespace TeklaPhaseManager_4
             listViewPhases.DrawItem         += listViewPhases_DrawItem;
             listViewPhases.DrawSubItem      += listViewPhases_DrawSubItem;
 
-            _cellEditor = new TextBox
-            {
-                Visible     = false,
-                BorderStyle = BorderStyle.FixedSingle,
-                BackColor   = _darkSurface,
-                ForeColor   = _darkText
-            };
-            _cellEditor.KeyDown    += CellEditor_KeyDown;
-            _cellEditor.LostFocus  += CellEditor_LostFocus;
+            _cellEditor = new TextBox { Visible = false, BorderStyle = BorderStyle.FixedSingle };
+            _cellEditor.KeyDown   += CellEditor_KeyDown;
+            _cellEditor.LostFocus += CellEditor_LostFocus;
             listViewPhases.Controls.Add(_cellEditor);
 
             SetFilterPlaceholder();
-            txtFilter.GotFocus  += (s, e) => { if (txtFilter.Text == FilterPlaceholder) { txtFilter.Text = ""; txtFilter.ForeColor = _darkText; } };
+            txtFilter.GotFocus  += (s, e) => { if (txtFilter.Text == FilterPlaceholder) { txtFilter.Text = ""; txtFilter.ForeColor = SystemColors.WindowText; } };
             txtFilter.LostFocus += (s, e) => { if (string.IsNullOrEmpty(txtFilter.Text)) SetFilterPlaceholder(); };
 
+            _phaseTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+            _phaseTimer.Tick += PhaseTimer_Tick;
+            _phaseTimer.Start();
+
+            ApplyDarkTheme();
             UpdateStatus();
         }
 
-        // ── Dark theme ──────────────────────────────────────────────────────
+        // ── Dark theme ───────────────────────────────────────────────────────
         private void ApplyDarkTheme()
         {
-            this.BackColor = _darkBg;
-            this.ForeColor = _darkText;
+            this.BackColor = DkFormBg;
 
-            foreach (Control c in this.Controls)
+            foreach (var btn in new[] { btnLoad, btnPin, btnAllVisible, btnAllHidden, button1, btnSavePreset, btnLoadPreset })
             {
-                if (c is Button btn)
+                btn.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+                btn.FlatAppearance.BorderColor = DkBorder;
+                btn.FlatAppearance.BorderSize  = 1;
+                btn.BackColor = DkBtnBg;
+                btn.ForeColor = DkText;
+                btn.Cursor    = Cursors.Hand;
+            }
+            btnLoad.BackColor = DkBtnAccent;
+            btnLoad.ForeColor = Color.White;
+            btnLoad.FlatAppearance.BorderColor = Color.FromArgb(0, 90, 170);
+
+            txtFilter.BackColor    = Color.White;
+            txtFilter.ForeColor    = DkText;
+            txtFilter.BorderStyle  = BorderStyle.FixedSingle;
+
+            txtPresetFile.BackColor   = Color.White;
+            txtPresetFile.ForeColor   = DkText;
+            txtPresetFile.BorderStyle = BorderStyle.FixedSingle;
+
+            _cellEditor.BackColor = Color.White;
+            _cellEditor.ForeColor = DkText;
+
+            listViewPhases.BackColor = DkListBg;
+            listViewPhases.ForeColor = DkText;
+
+            statusStrip1.BackColor = DkStatusBg;
+            statusStrip1.Renderer  = new DarkStripRenderer();
+            statusLabelModel.ForeColor = DkTextDim;
+            statusLabelModel.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
+            statusLabelBrand.ForeColor = Color.FromArgb(0, 80, 160);
+            statusLabelBrand.Font      = new Font(statusStrip1.Font, FontStyle.Bold);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            _phaseTimer?.Stop();
+            _phaseTimer?.Dispose();
+            base.OnFormClosed(e);
+        }
+
+        private void PhaseTimer_Tick(object sender, EventArgs e)
+        {
+            if (_model == null || !_model.GetConnectionStatus()) return;
+            try
+            {
+                int cp = _model.GetInfo().CurrentPhase;
+                if (cp != _activePhaseNumber)
                 {
-                    btn.FlatStyle = FlatStyle.Flat;
-                    btn.BackColor = _darkSurface;
-                    btn.ForeColor = _darkText;
-                    btn.FlatAppearance.BorderColor = _darkBorder;
-                }
-                else if (c is Label lbl)
-                {
-                    lbl.BackColor = Color.Transparent;
-                    lbl.ForeColor = _darkSubText;
-                }
-                else if (c is TextBox tb)
-                {
-                    tb.BackColor   = _darkListBg;
-                    tb.ForeColor   = _darkText;
-                    tb.BorderStyle = BorderStyle.FixedSingle;
-                }
-                else if (c is ListView lv)
-                {
-                    lv.BackColor = _darkListBg;
-                    lv.ForeColor = _darkText;
-                }
-                else if (c is StatusStrip ss)
-                {
-                    ss.BackColor  = Color.FromArgb(30, 30, 30);
-                    ss.ForeColor  = _darkText;
-                    ss.Renderer   = new DarkStatusRenderer();
+                    _activePhaseNumber = cp;
+                    listViewPhases.Invalidate();
                 }
             }
+            catch { }
         }
 
         private void SetFilterPlaceholder()
         {
             txtFilter.Text      = FilterPlaceholder;
-            txtFilter.ForeColor = _darkSubText;
+            txtFilter.ForeColor = SystemColors.GrayText;
         }
 
         // ── Status bar ──────────────────────────────────────────────────────
         private void UpdateStatus()
         {
-            bool connected = _model != null && _model.GetConnectionStatus();
-            statusLabelConnection.ForeColor = connected ? Color.FromArgb(100, 210, 100) : Color.FromArgb(220, 80, 80);
-            statusLabelConnection.Text      = connected ? "● Połączony" : "● Rozłączony";
-            statusLabelModel.Text           = connected ? _model.GetInfo().ModelName : "";
+            bool ok = _model != null && _model.GetConnectionStatus();
+            statusLabelConnection.ForeColor = ok ? Color.FromArgb(16, 124, 16) : Color.FromArgb(196, 43, 28);
+            statusLabelConnection.Text      = ok ? "● Connected" : "● Disconnected";
+            statusLabelModel.Text           = ok ? _model.GetInfo().ModelName : "";
         }
 
         // ── Load phases ─────────────────────────────────────────────────────
@@ -146,7 +176,7 @@ namespace TeklaPhaseManager_4
             if (_model == null || !_model.GetConnectionStatus()) _model = new Model();
             if (!_model.GetConnectionStatus())
             {
-                MessageBox.Show("Brak połączenia z Tekla Structures.", "TPM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("No connection to Tekla Structures.", "TPM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 UpdateStatus();
                 return;
             }
@@ -154,10 +184,10 @@ namespace TeklaPhaseManager_4
             _allItems.Clear();
             listViewPhases.Items.Clear();
 
-            PhaseCollection phases         = _model.GetPhases();
-            var existingColors             = ReadExistingPhaseColors();
-            var existingVisibility         = ReadExistingVisibility();
-            var existingTransparency       = ReadExistingPhaseTransparency();
+            PhaseCollection phases           = _model.GetPhases();
+            var existingColors               = ReadExistingPhaseColors();
+            var existingVisibility           = ReadExistingVisibility();
+            var existingTransparency         = ReadExistingPhaseTransparency();
 
             var phaseList = new List<Phase>();
             foreach (Phase ph in phases) phaseList.Add(ph);
@@ -191,17 +221,19 @@ namespace TeklaPhaseManager_4
                 bool isVis = existingVisibility.ContainsKey(phase.PhaseNumber) && existingVisibility[phase.PhaseNumber];
                 item.SubItems.Add(isVis ? "1" : "0");
 
-                string trans = existingTransparency.ContainsKey(phase.PhaseNumber) ? existingTransparency[phase.PhaseNumber] : "jak jest";
+                string trans = existingTransparency.ContainsKey(phase.PhaseNumber) ? existingTransparency[phase.PhaseNumber] : "as is";
                 item.SubItems.Add(trans);
 
-                item.SubItems.Add("...");  // column 6 — object count loaded async
+                item.SubItems.Add("-");   // col 6: object count loaded async
 
                 _allItems.Add(item);
             }
 
             ApplyFilter();
             UpdateStatus();
-            LoadObjectCountsAsync();
+            LoadObjectCounts();
+            try { _activePhaseNumber = _model.GetInfo().CurrentPhase; } catch { }
+            listViewPhases.Invalidate();
         }
 
         // ── Filter ──────────────────────────────────────────────────────────
@@ -257,40 +289,58 @@ namespace TeklaPhaseManager_4
             }
         }
 
-        // ── Object count (async) ────────────────────────────────────────────
-        private async void LoadObjectCountsAsync()
+        // ── Object count — STA thread, own Model instance ───────────────────
+        private void LoadObjectCounts()
         {
-            Dictionary<int, int> counts = await Tasks.Task.Run(() =>
+            foreach (ListViewItem it in _allItems)
+                if (it.SubItems.Count > 6) it.SubItems[6].Text = "...";
+            listViewPhases.Invalidate();
+
+            Thread t = new Thread(() =>
             {
-                var result = new Dictionary<int, int>();
+                var counts = new Dictionary<int, int>();
+                bool success = false;
                 try
                 {
-                    var objs = _model.GetModelObjectSelector()
-                                     .GetAllObjectsWithType(ModelObject.ModelObjectEnum.UNKNOWN);
-                    while (objs.MoveNext())
+                    Model m = new Model();
+                    if (m.GetConnectionStatus())
                     {
-                        if (objs.Current is Part p)
+                        var objs = m.GetModelObjectSelector()
+                                    .GetAllObjects();
+                        while (objs.MoveNext())
                         {
-                            p.GetPhase(out Phase ph);
-                            if (!result.ContainsKey(ph.PhaseNumber)) result[ph.PhaseNumber] = 0;
-                            result[ph.PhaseNumber]++;
+                            if (objs.Current is Part p)
+                            {
+                                p.GetPhase(out Phase ph);
+                                if (!counts.ContainsKey(ph.PhaseNumber)) counts[ph.PhaseNumber] = 0;
+                                counts[ph.PhaseNumber]++;
+                            }
                         }
+                        success = true;
                     }
                 }
                 catch { }
-                return result;
-            });
 
-            if (IsDisposed || !IsHandleCreated) return;
-            Invoke((Action)(() =>
-            {
-                foreach (ListViewItem item in _allItems)
+                if (IsDisposed) return;
+                try
                 {
-                    if (int.TryParse(item.Text, out int num) && item.SubItems.Count > 6)
-                        item.SubItems[6].Text = counts.ContainsKey(num) ? counts[num].ToString() : "0";
+                    Invoke((Action)(() =>
+                    {
+                        foreach (ListViewItem it in _allItems)
+                        {
+                            if (int.TryParse(it.Text, out int n) && it.SubItems.Count > 6)
+                                it.SubItems[6].Text = success
+                                    ? (counts.ContainsKey(n) ? counts[n].ToString() : "0")
+                                    : "?";
+                        }
+                        listViewPhases.Invalidate();
+                    }));
                 }
-                listViewPhases.Invalidate();
-            }));
+                catch { }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.IsBackground = true;
+            t.Start();
         }
 
         // ── All visible / hidden ─────────────────────────────────────────────
@@ -315,25 +365,34 @@ namespace TeklaPhaseManager_4
         {
             using (SaveFileDialog dlg = new SaveFileDialog())
             {
-                dlg.Title       = "Zapisz preset";
-                dlg.Filter      = "Preset TPM (*.tpm)|*.tpm|Wszystkie pliki (*.*)|*.*";
-                dlg.DefaultExt  = "tpm";
-                if (_model != null && _model.GetConnectionStatus())
-                    dlg.InitialDirectory = Path.Combine(_model.GetInfo().ModelPath, "attributes");
+                dlg.Title      = "Save Preset";
+                dlg.Filter     = "TPM Preset (*.tpm)|*.tpm|All files (*.*)|*.*";
+                dlg.DefaultExt = "tpm";
+
+                string dir = !string.IsNullOrEmpty(_currentPresetPath)
+                    ? Path.GetDirectoryName(_currentPresetPath)
+                    : (_model != null && _model.GetConnectionStatus() ? Path.Combine(_model.GetInfo().ModelPath, "attributes") : "");
+                if (!string.IsNullOrEmpty(dir)) dlg.InitialDirectory = dir;
+
+                string edited = txtPresetFile.Text.Trim();
+                if (!string.IsNullOrEmpty(edited))
+                    dlg.FileName = edited.EndsWith(".tpm", StringComparison.OrdinalIgnoreCase) ? edited : edited + ".tpm";
+
                 if (dlg.ShowDialog() != DialogResult.OK) return;
+                _currentPresetPath = dlg.FileName;
+                txtPresetFile.Text = Path.GetFileNameWithoutExtension(dlg.FileName);
 
                 var sb = new StringBuilder();
                 sb.AppendLine("# TeklaPhaseManager_4 Preset");
-                sb.AppendLine("# Nr;Kolor;Widocznosc;Przezroczystosc");
+                sb.AppendLine("# No.;Color;Visible;Transparency");
                 foreach (ListViewItem item in _allItems)
                 {
                     string color = item.SubItems.Count > 3 ? item.SubItems[3].Text : "";
                     string vis   = item.SubItems.Count > 4 ? item.SubItems[4].Text : "0";
-                    string trans = item.SubItems.Count > 5 ? item.SubItems[5].Text : "jak jest";
+                    string trans = item.SubItems.Count > 5 ? item.SubItems[5].Text : "as is";
                     sb.AppendLine($"{item.Text};{color};{vis};{trans}");
                 }
                 File.WriteAllText(dlg.FileName, sb.ToString(), Encoding.UTF8);
-                MessageBox.Show("Preset zapisany.", "TPM", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
 
@@ -341,11 +400,13 @@ namespace TeklaPhaseManager_4
         {
             using (OpenFileDialog dlg = new OpenFileDialog())
             {
-                dlg.Title  = "Wczytaj preset";
-                dlg.Filter = "Preset TPM (*.tpm)|*.tpm|Wszystkie pliki (*.*)|*.*";
+                dlg.Title  = "Load Preset";
+                dlg.Filter = "TPM Preset (*.tpm)|*.tpm|All files (*.*)|*.*";
                 if (_model != null && _model.GetConnectionStatus())
                     dlg.InitialDirectory = Path.Combine(_model.GetInfo().ModelPath, "attributes");
                 if (dlg.ShowDialog() != DialogResult.OK) return;
+                _currentPresetPath = dlg.FileName;
+                txtPresetFile.Text = Path.GetFileNameWithoutExtension(dlg.FileName);
 
                 var presetData = new Dictionary<int, (string color, string vis, string trans)>();
                 foreach (string line in File.ReadAllLines(dlg.FileName, Encoding.UTF8))
@@ -359,14 +420,13 @@ namespace TeklaPhaseManager_4
                 foreach (ListViewItem item in _allItems)
                 {
                     if (!int.TryParse(item.Text, out int num) || !presetData.ContainsKey(num)) continue;
-                    var (color, vis, trans) = presetData[num];
-                    ApplyColorToItemSingle(item, string.IsNullOrEmpty(color) ? "brak" : color);
-                    if (item.SubItems.Count > 4) item.SubItems[4].Text = vis;
-                    if (item.SubItems.Count > 5) item.SubItems[5].Text = _transLabels.Contains(trans) ? trans : "jak jest";
+                    var pd = presetData[num];
+                    ApplyColorToItemSingle(item, string.IsNullOrEmpty(pd.color) ? "brak" : pd.color);
+                    if (item.SubItems.Count > 4) item.SubItems[4].Text = pd.vis;
+                    if (item.SubItems.Count > 5) item.SubItems[5].Text = _transLabels.Contains(pd.trans) ? pd.trans : "as is";
                 }
                 listViewPhases.Invalidate();
                 SaveFiles();
-                MessageBox.Show("Preset wczytany.", "TPM", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
 
@@ -376,32 +436,25 @@ namespace TeklaPhaseManager_4
             ListViewItem item = listViewPhases.GetItemAt(e.X, e.Y);
             if (item == null) return;
 
+            if (e.Button == MouseButtons.Right) { ShowPhaseContextMenu(item, e.X, e.Y); return; }
+
             if (_cellEditor.Visible) CommitCellEdit();
 
             int col = GetClickedColumnIndex(e.X);
 
             if (col == 1 || col == 2) { BeginCellEdit(item, col); return; }
-
-            if (col == 3) { ShowColorContextMenu(item, e.X, e.Y); return; }
+            if (col == 3)             { ShowColorContextMenu(item, e.X, e.Y); return; }
 
             if (col == 4 && item.SubItems.Count > 4)
             {
                 bool cur = IsVisibleCellValue(item.SubItems[4].Text);
-                foreach (ListViewItem t in GetTargetItems(item))
-                    if (t.SubItems.Count > 4) t.SubItems[4].Text = cur ? "0" : "1";
+                item.SubItems[4].Text = cur ? "0" : "1";
                 listViewPhases.Invalidate();
                 SaveFiles();
                 return;
             }
 
-            if (col == 5) { ShowTransparencyContextMenu(item, e.X, e.Y); }
-        }
-
-        private List<ListViewItem> GetTargetItems(ListViewItem clicked)
-        {
-            if (listViewPhases.SelectedItems.Count > 1 && listViewPhases.SelectedItems.Contains(clicked))
-                return listViewPhases.SelectedItems.Cast<ListViewItem>().ToList();
-            return new List<ListViewItem> { clicked };
+            if (col == 5) ShowTransparencyContextMenu(item, e.X, e.Y);
         }
 
         private bool IsVisibleCellValue(string v) => v == "1" || v == "☑";
@@ -409,12 +462,8 @@ namespace TeklaPhaseManager_4
         // ── Transparency context menu ────────────────────────────────────────
         private void ShowTransparencyContextMenu(ListViewItem item, int x, int y)
         {
-            string current = item.SubItems.Count > 5 ? item.SubItems[5].Text : "jak jest";
+            string current = item.SubItems.Count > 5 ? item.SubItems[5].Text : "as is";
             ContextMenuStrip menu = new ContextMenuStrip();
-            menu.Renderer = new DarkMenuRenderer();
-            menu.BackColor = _darkSurface;
-            menu.ForeColor = _darkText;
-
             foreach (string label in _transLabels)
             {
                 string lbl = label;
@@ -422,13 +471,13 @@ namespace TeklaPhaseManager_4
                 mi.Click += (s, ev) => ApplyTransparencyToItem(item, lbl);
                 menu.Items.Add(mi);
             }
+            ApplyDarkContextMenu(menu);
             menu.Show(listViewPhases, x, y);
         }
 
-        private void ApplyTransparencyToItem(ListViewItem clickedItem, string label)
+        private void ApplyTransparencyToItem(ListViewItem item, string label)
         {
-            foreach (ListViewItem item in GetTargetItems(clickedItem))
-                if (item.SubItems.Count > 5) item.SubItems[5].Text = label;
+            if (item.SubItems.Count > 5) item.SubItems[5].Text = label;
             SaveFiles();
         }
 
@@ -436,12 +485,9 @@ namespace TeklaPhaseManager_4
         private void ShowColorContextMenu(ListViewItem item, int x, int y)
         {
             ContextMenuStrip menu = new ContextMenuStrip();
-            menu.Renderer  = new DarkMenuRenderer();
-            menu.BackColor = _darkSurface;
-            menu.ForeColor = _darkText;
             menu.ShowImageMargin = true;
 
-            ToolStripMenuItem noColor = new ToolStripMenuItem("Jak jest / Brak koloru");
+            ToolStripMenuItem noColor = new ToolStripMenuItem("No color");
             noColor.Click += (s, e) => ApplyColorToItem(item, "brak");
             menu.Items.Add(noColor);
             menu.Items.Add(new ToolStripSeparator());
@@ -449,14 +495,14 @@ namespace TeklaPhaseManager_4
             for (int i = 0; i < _teklaColors.Length; i++)
             {
                 int idx = i;
-                ToolStripMenuItem mi = new ToolStripMenuItem($"Kolor {idx}");
+                ToolStripMenuItem mi = new ToolStripMenuItem($"Color {idx}");
                 mi.Image  = CreateColorSwatchImage(_teklaColors[idx]);
                 mi.Click += (s, e) => ApplyColorToItem(item, idx.ToString());
                 menu.Items.Add(mi);
             }
 
             menu.Items.Add(new ToolStripSeparator());
-            ToolStripMenuItem custom = new ToolStripMenuItem("Wybierz kolor...");
+            ToolStripMenuItem custom = new ToolStripMenuItem("Custom...");
             custom.Click += (s, e) =>
             {
                 using (ColorDialog cd = new ColorDialog { AnyColor = true, FullOpen = true })
@@ -464,13 +510,13 @@ namespace TeklaPhaseManager_4
                         ApplyColorToItem(item, EncodeColorToken(cd.Color));
             };
             menu.Items.Add(custom);
+            ApplyDarkContextMenu(menu);
             menu.Show(listViewPhases, x, y);
         }
 
-        private void ApplyColorToItem(ListViewItem clickedItem, string colorId)
+        private void ApplyColorToItem(ListViewItem item, string colorId)
         {
-            foreach (ListViewItem item in GetTargetItems(clickedItem))
-                ApplyColorToItemSingle(item, colorId);
+            ApplyColorToItemSingle(item, colorId);
             SaveFiles();
         }
 
@@ -480,17 +526,17 @@ namespace TeklaPhaseManager_4
             if (colorId == "brak")
             {
                 item.SubItems[3].Text      = "";
-                item.SubItems[3].BackColor = _darkListBg;
-                item.SubItems[3].ForeColor = _darkText;
+                item.SubItems[3].BackColor = SystemColors.Window;
+                item.SubItems[3].ForeColor = SystemColors.WindowText;
             }
             else
             {
                 item.SubItems[3].Text = colorId;
                 if (TryParseStoredColor(colorId, out Color c))
                 {
-                    item.UseItemStyleForSubItems  = false;
-                    item.SubItems[3].BackColor    = c;
-                    item.SubItems[3].ForeColor    = ((c.R * 0.299) + (c.G * 0.587) + (c.B * 0.114) > 160) ? Color.Black : Color.White;
+                    item.UseItemStyleForSubItems = false;
+                    item.SubItems[3].BackColor   = c;
+                    item.SubItems[3].ForeColor   = ((c.R * 0.299) + (c.G * 0.587) + (c.B * 0.114) > 160) ? Color.Black : Color.White;
                 }
             }
         }
@@ -508,93 +554,332 @@ namespace TeklaPhaseManager_4
             return bmp;
         }
 
+        // ── PPM context menu ─────────────────────────────────────────────────
+        private void ShowPhaseContextMenu(ListViewItem clickedItem, int x, int y)
+        {
+            var selected = listViewPhases.SelectedItems.Cast<ListViewItem>().ToList();
+            if (!selected.Contains(clickedItem)) { selected.Clear(); selected.Add(clickedItem); }
+            if (selected.Count == 0) return;
+
+            ContextMenuStrip menu = new ContextMenuStrip();
+
+            // ── Set current phase (single only) ────────────────────────────
+            if (selected.Count == 1 && int.TryParse(selected[0].Text, out int singleNum))
+            {
+                bool isActive = singleNum == _activePhaseNumber;
+                var miActive = new ToolStripMenuItem(isActive ? "✔ Current Phase" : "Set as Current Phase");
+                if (isActive) miActive.Enabled = false;
+                else miActive.Click += (s, ev) =>
+                {
+                    _activePhaseNumber = singleNum;
+                    listViewPhases.Invalidate();
+                    SetActivePhaseApi(singleNum);
+                };
+                menu.Items.Add(miActive);
+                menu.Items.Add(new ToolStripSeparator());
+            }
+
+            // ── Visibility ─────────────────────────────────────────────────
+            var miVis = new ToolStripMenuItem("Visible");
+            miVis.Click += (s, ev) => { foreach (var it in selected) if (it.SubItems.Count > 4) it.SubItems[4].Text = "1"; listViewPhases.Invalidate(); SaveFiles(); };
+            menu.Items.Add(miVis);
+
+            var miHid = new ToolStripMenuItem("Hidden");
+            miHid.Click += (s, ev) => { foreach (var it in selected) if (it.SubItems.Count > 4) it.SubItems[4].Text = "0"; listViewPhases.Invalidate(); SaveFiles(); };
+            menu.Items.Add(miHid);
+
+            // ── Transparency ▶ ─────────────────────────────────────────────
+            var miTrans = new ToolStripMenuItem("Transparency");
+            foreach (string lbl in _transLabels)
+            {
+                string label = lbl;
+                var mi = new ToolStripMenuItem(label);
+                mi.Click += (s, ev) => { foreach (var it in selected) if (it.SubItems.Count > 5) it.SubItems[5].Text = label; listViewPhases.Invalidate(); SaveFiles(); };
+                miTrans.DropDownItems.Add(mi);
+            }
+            menu.Items.Add(miTrans);
+
+            // ── Color ▶ ────────────────────────────────────────────────────
+            var miColorMenu = new ToolStripMenuItem("Color");
+            var miNoColor = new ToolStripMenuItem("No color");
+            miNoColor.Click += (s, ev) => { foreach (var it in selected) ApplyColorToItemSingle(it, "brak"); listViewPhases.Invalidate(); SaveFiles(); };
+            miColorMenu.DropDownItems.Add(miNoColor);
+            miColorMenu.DropDownItems.Add(new ToolStripSeparator());
+            for (int i = 0; i < _teklaColors.Length; i++)
+            {
+                int idx = i;
+                var mi = new ToolStripMenuItem($"Color {idx}") { Image = CreateColorSwatchImage(_teklaColors[idx]) };
+                mi.Click += (s, ev) => { foreach (var it in selected) ApplyColorToItemSingle(it, idx.ToString()); listViewPhases.Invalidate(); SaveFiles(); };
+                miColorMenu.DropDownItems.Add(mi);
+            }
+            miColorMenu.DropDownItems.Add(new ToolStripSeparator());
+            var miCustomColor = new ToolStripMenuItem("Custom...");
+            miCustomColor.Click += (s, ev) =>
+            {
+                using (ColorDialog cd = new ColorDialog { AnyColor = true, FullOpen = true })
+                    if (cd.ShowDialog(this) == DialogResult.OK)
+                    {
+                        string tok = EncodeColorToken(cd.Color);
+                        foreach (var it in selected) ApplyColorToItemSingle(it, tok);
+                        listViewPhases.Invalidate();
+                        SaveFiles();
+                    }
+            };
+            miColorMenu.DropDownItems.Add(miCustomColor);
+            menu.Items.Add(miColorMenu);
+
+            menu.Items.Add(new ToolStripSeparator());
+
+            // ── Select objects in model ────────────────────────────────────
+            var miSelect = new ToolStripMenuItem(selected.Count == 1 ? "Select phase objects" : $"Select objects ({selected.Count} phases)");
+            miSelect.Click += (s, ev) => SelectObjectsInPhases(selected);
+            menu.Items.Add(miSelect);
+
+            menu.Items.Add(new ToolStripSeparator());
+            var miAbout = new ToolStripMenuItem("ℹ  About / Macro info...");
+            miAbout.Click += (s, ev) => ShowAboutDialog();
+            menu.Items.Add(miAbout);
+
+            ApplyDarkContextMenu(menu);
+            menu.Show(listViewPhases, x, y);
+        }
+
+        private void ShowAboutDialog()
+        {
+            string msg =
+                "TeklaPhaseManager TPM  —  2026.05  —  Freeware\r\n" +
+                "Author: DRAFTCON.PL\r\n" +
+                "https://github.com/DRAFTCON-PL/TeklaPhaseManager_4\r\n" +
+                "\r\n" +
+                "─────────────────────────────────────────────────\r\n" +
+                "REQUIRED: Tekla macro  +TeklaRedrawView.cs\r\n" +
+                "─────────────────────────────────────────────────\r\n" +
+                "This macro is needed for Apply / Save to refresh\r\n" +
+                "the view representation and visibility filter.\r\n" +
+                "\r\n" +
+                "The macro is AUTO-GENERATED by TPM into the model\r\n" +
+                "folder on first Save/Apply — no manual install needed.\r\n" +
+                "\r\n" +
+                "If the view does not refresh, manually copy the macro\r\n" +
+                "from the model folder to your Tekla macros directory,\r\n" +
+                "or download it from GitHub:\r\n" +
+                "https://github.com/DRAFTCON-PL/TeklaPhaseManager";
+            MessageBox.Show(msg, "About TeklaPhaseManager", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void SetActivePhaseApi(int phaseNumber)
+        {
+            try
+            {
+                if (_model == null || !_model.GetConnectionStatus()) return;
+                PhaseCollection phases = _model.GetPhases();
+                foreach (Phase phase in phases)
+                {
+                    if (phase.PhaseNumber == phaseNumber)
+                    {
+                        phase.IsCurrentPhase = 1;
+                        phase.Modify();
+                        _model.CommitChanges();
+                        return;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void SelectObjectsInPhases(List<ListViewItem> items)
+        {
+            var phaseNums = new HashSet<int>();
+            foreach (var it in items)
+                if (int.TryParse(it.Text, out int n)) phaseNums.Add(n);
+            if (phaseNums.Count == 0) return;
+
+            statusLabelConnection.Text      = "⟳ Selecting objects...";
+            statusLabelConnection.ForeColor = Color.FromArgb(200, 160, 50);
+
+            Thread t = new Thread(() =>
+            {
+                try
+                {
+                    Model m = new Model();
+                    if (!m.GetConnectionStatus()) { Invoke((Action)UpdateStatus); return; }
+                    var objs   = m.GetModelObjectSelector().GetAllObjects();
+                    var result = new System.Collections.ArrayList();
+                    while (objs.MoveNext())
+                    {
+                        if (objs.Current is Part p)
+                        {
+                            p.GetPhase(out Phase ph);
+                            if (phaseNums.Contains(ph.PhaseNumber)) result.Add(p);
+                        }
+                    }
+                    new Tekla.Structures.Model.UI.ModelObjectSelector().Select(result);
+                }
+                catch { }
+                finally
+                {
+                    if (!IsDisposed)
+                        try { Invoke((Action)UpdateStatus); } catch { }
+                }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.IsBackground = true;
+            t.Start();
+        }
+
         // ── OwnerDraw ────────────────────────────────────────────────────────
         private void listViewPhases_DrawColumnHeader(object sender, DrawListViewColumnHeaderEventArgs e)
         {
-            using (SolidBrush bg  = new SolidBrush(_darkSurface))
-            using (Pen border     = new Pen(_darkBorder, 1f))
+            using (SolidBrush b = new SolidBrush(DkListHdr))
+                e.Graphics.FillRectangle(b, e.Bounds);
+
+            using (Pen p = new Pen(DkGrid))
             {
-                e.Graphics.FillRectangle(bg, e.Bounds);
-                e.Graphics.DrawRectangle(border, new Rectangle(e.Bounds.X, e.Bounds.Y, e.Bounds.Width - 1, e.Bounds.Height - 1));
+                e.Graphics.DrawLine(p, e.Bounds.Right - 1, e.Bounds.Top, e.Bounds.Right - 1, e.Bounds.Bottom);
+                e.Graphics.DrawLine(p, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
             }
-            string arrow = "";
-            if (e.ColumnIndex == _sortColumn)
-                arrow = _sortOrder == SortOrder.Ascending ? " ▲" : " ▼";
-            TextRenderer.DrawText(e.Graphics, e.Header.Text + arrow, e.Font, e.Bounds, _darkText,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.LeftAndRightPadding | TextFormatFlags.SingleLine);
+
+            string arrow = e.ColumnIndex == _sortColumn
+                ? (_sortOrder == SortOrder.Ascending ? " ▲" : " ▼") : "";
+
+            using (Font hf = new Font(listViewPhases.Font, FontStyle.Bold))
+                TextRenderer.DrawText(e.Graphics, e.Header.Text + arrow, hf, e.Bounds,
+                    DkText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
 
-        private void listViewPhases_DrawItem(object sender, DrawListViewItemEventArgs e) { }
+        private void listViewPhases_DrawItem(object sender, DrawListViewItemEventArgs e)
+        {
+            // background handled per-subitem; suppress default
+        }
 
         private void listViewPhases_DrawSubItem(object sender, DrawListViewSubItemEventArgs e)
         {
-            bool selected = e.Item.Selected;
-            int  idx      = e.Item.Index;
+            bool sel    = e.Item.Selected;
+            bool alt    = e.ItemIndex % 2 == 1;
+            Color rowBg = sel ? DkListSel : (alt ? DkListAlt : DkListBg);
+            Color rowFg = DkText;
 
-            if (e.ColumnIndex == 3)
+            // ── Col 0: phase number + active-phase highlight ─────────────
+            if (e.ColumnIndex == 0)
             {
-                Color back = e.SubItem.BackColor;
-                if (back == Color.Empty || back == SystemColors.Window) back = _darkListBg;
-                using (SolidBrush b = new SolidBrush(back))
-                    e.Graphics.FillRectangle(b, e.Bounds);
-                string txt = e.SubItem.Text ?? "";
-                if (txt.StartsWith("#")) txt = "Custom";
-                Color fore = (e.SubItem.ForeColor == Color.Empty) ? _darkText : e.SubItem.ForeColor;
-                TextRenderer.DrawText(e.Graphics, txt, listViewPhases.Font, e.Bounds, fore,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.LeftAndRightPadding);
+                if (_activePhaseNumber >= 0 && int.TryParse(e.SubItem.Text, out int pn) && pn == _activePhaseNumber)
+                {
+                    Color abg = sel ? Color.FromArgb(255, 220, 100) : Color.FromArgb(255, 243, 188);
+                    Color afg = Color.FromArgb(100, 60, 0);
+                    using (SolidBrush b = new SolidBrush(abg)) e.Graphics.FillRectangle(b, e.Bounds);
+                    using (Font bold = new Font(listViewPhases.Font, FontStyle.Bold))
+                        TextRenderer.DrawText(e.Graphics, e.SubItem.Text, bold, e.Bounds, afg,
+                            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+                    DrawCellBorder(e.Graphics, e.Bounds);
+                    return;
+                }
+                using (SolidBrush b = new SolidBrush(rowBg)) e.Graphics.FillRectangle(b, e.Bounds);
+                TextRenderer.DrawText(e.Graphics, e.SubItem.Text, listViewPhases.Font, e.Bounds, rowFg,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+                DrawCellBorder(e.Graphics, e.Bounds);
                 return;
             }
 
+            // ── Col 3: colour swatch ─────────────────────────────────────
+            if (e.ColumnIndex == 3)
+            {
+                Color swatchBg = (e.SubItem.BackColor != Color.Empty && e.SubItem.BackColor != SystemColors.Window)
+                    ? e.SubItem.BackColor : rowBg;
+                using (SolidBrush b = new SolidBrush(swatchBg)) e.Graphics.FillRectangle(b, e.Bounds);
+
+                string txt = e.SubItem.Text ?? "";
+                if (txt.StartsWith("#")) txt = "Custom";
+                Color swatchFg = (e.SubItem.ForeColor != Color.Empty && e.SubItem.ForeColor != SystemColors.WindowText)
+                    ? e.SubItem.ForeColor : rowFg;
+                TextRenderer.DrawText(e.Graphics, txt, listViewPhases.Font, e.Bounds, swatchFg,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.LeftAndRightPadding);
+                DrawCellBorder(e.Graphics, e.Bounds);
+                return;
+            }
+
+            // ── Col 4: eye icon ───────────────────────────────────────────
             if (e.ColumnIndex == 4)
             {
-                Color bg = selected ? _darkAccent : (idx % 2 == 0 ? _darkListBg : _darkListAlt);
-                using (SolidBrush b = new SolidBrush(bg))
-                    e.Graphics.FillRectangle(b, e.Bounds);
+                using (SolidBrush b = new SolidBrush(rowBg)) e.Graphics.FillRectangle(b, e.Bounds);
+                DrawVisibilityIcon(e.Graphics, e.Bounds, IsVisibleCellValue(e.SubItem.Text));
+                DrawCellBorder(e.Graphics, e.Bounds);
+                return;
+            }
 
-                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                Rectangle ir = new Rectangle(
-                    e.Bounds.X + (e.Bounds.Width - 18) / 2,
-                    e.Bounds.Y + (e.Bounds.Height - 12) / 2, 18, 12);
+            // ── All other columns ─────────────────────────────────────────
+            using (SolidBrush b = new SolidBrush(rowBg)) e.Graphics.FillRectangle(b, e.Bounds);
+            var pad = Rectangle.Inflate(e.Bounds, -3, 0);
+            TextRenderer.DrawText(e.Graphics, e.SubItem.Text ?? "", listViewPhases.Font, pad, rowFg,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            DrawCellBorder(e.Graphics, e.Bounds);
+        }
 
-                bool vis = IsVisibleCellValue(e.SubItem.Text);
-                if (vis)
+        private void DrawVisibilityIcon(Graphics g, Rectangle cell, bool visible)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            const int iw = 18, ih = 10;
+            float cx = cell.X + cell.Width  / 2f;
+            float cy = cell.Y + cell.Height / 2f;
+            float lx = cx - iw / 2f;
+            float ty = cy - ih / 2f;
+            float rx = lx + iw;
+            float by = ty + ih;
+
+            // almond shape: left-tip → top bezier → right-tip → bottom bezier
+            using (var eye = new System.Drawing.Drawing2D.GraphicsPath())
+            {
+                eye.AddBezier(lx, cy,  lx + iw * 0.28f, ty,  rx - iw * 0.28f, ty,  rx, cy);
+                eye.AddBezier(rx, cy,  rx - iw * 0.28f, by,  lx + iw * 0.28f, by,  lx, cy);
+                eye.CloseFigure();
+
+                if (visible)
                 {
-                    using (Pen pen = new Pen(Color.FromArgb(80, 180, 255), 1.5f))
-                        e.Graphics.DrawEllipse(pen, ir);
-                    Rectangle pupil = new Rectangle(ir.X + 5, ir.Y + 3, 8, 6);
-                    using (SolidBrush pb = new SolidBrush(Color.FromArgb(80, 180, 255)))
-                        e.Graphics.FillEllipse(pb, pupil);
+                    // white sclera
+                    using (SolidBrush fill = new SolidBrush(Color.White))
+                        g.FillPath(fill, eye);
+                    // dark iris
+                    float ir = ih * 0.32f;
+                    using (SolidBrush iris = new SolidBrush(Color.FromArgb(50, 50, 50)))
+                        g.FillEllipse(iris, cx - ir, cy - ir, ir * 2, ir * 2);
+                    // dark outline
+                    using (Pen pen = new Pen(Color.FromArgb(50, 50, 50), 1.2f))
+                        g.DrawPath(pen, eye);
                 }
                 else
                 {
-                    using (SolidBrush gb = new SolidBrush(Color.FromArgb(100, Color.Gray)))
-                        e.Graphics.FillEllipse(gb, ir);
-                    using (Pen lp = new Pen(Color.FromArgb(200, 60, 60), 2f))
-                        e.Graphics.DrawLine(lp, ir.X + 2, ir.Y + ir.Height / 2, ir.Right - 2, ir.Y + ir.Height / 2);
+                    // light gray sclera
+                    using (SolidBrush fill = new SolidBrush(Color.FromArgb(205, 205, 205)))
+                        g.FillPath(fill, eye);
+                    // gray outline
+                    using (Pen pen = new Pen(Color.FromArgb(140, 140, 140), 1.2f))
+                        g.DrawPath(pen, eye);
+                    // diagonal red slash clipped to eye shape
+                    var state = g.Save();
+                    g.SetClip(eye);
+                    using (Pen slash = new Pen(Color.FromArgb(185, 45, 45), 1.8f))
+                        g.DrawLine(slash, lx + 2, by - 1, rx - 2, ty + 1);
+                    g.Restore(state);
                 }
-                e.Graphics.SmoothingMode = SmoothingMode.Default;
-                return;
             }
 
-            // All other columns
-            Color cellBg = selected ? _darkAccent : (idx % 2 == 0 ? _darkListBg : _darkListAlt);
-            Color textFg = selected ? Color.White : _darkText;
+            g.SmoothingMode = SmoothingMode.Default;
+        }
 
-            using (SolidBrush bgBrush = new SolidBrush(cellBg))
-                e.Graphics.FillRectangle(bgBrush, e.Bounds);
-
-            string text = e.ColumnIndex == 0 ? e.Item.Text : (e.SubItem?.Text ?? "");
-            if (e.ColumnIndex == 6 && text == "...") textFg = _darkSubText;
-
-            TextRenderer.DrawText(e.Graphics, text, listViewPhases.Font, e.Bounds, textFg,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.LeftAndRightPadding);
+        private void DrawCellBorder(Graphics g, Rectangle r)
+        {
+            using (Pen p = new Pen(DkGrid))
+            {
+                g.DrawLine(p, r.Right - 1, r.Top, r.Right - 1, r.Bottom - 1);
+                g.DrawLine(p, r.Left, r.Bottom - 1, r.Right, r.Bottom - 1);
+            }
         }
 
         // ── Inline cell editor ───────────────────────────────────────────────
         private void BeginCellEdit(ListViewItem item, int column)
         {
             if (item == null || column < 0 || column >= item.SubItems.Count) return;
-            _editingItem = item;
+            _editingItem   = item;
             _editingColumn = column;
             int.TryParse(item.Text, out _editingOriginalPhaseNumber);
             Rectangle b = item.SubItems[column].Bounds;
@@ -607,7 +892,7 @@ namespace TeklaPhaseManager_4
 
         private void CellEditor_KeyDown(object sender, KeyEventArgs e)
         {
-            if (e.KeyCode == Keys.Enter)  { CommitCellEdit(); e.SuppressKeyPress = true; }
+            if (e.KeyCode == Keys.Enter)       { CommitCellEdit(); e.SuppressKeyPress = true; }
             else if (e.KeyCode == Keys.Escape) { CancelCellEdit(); e.SuppressKeyPress = true; }
         }
 
@@ -627,7 +912,7 @@ namespace TeklaPhaseManager_4
             {
                 if (!int.TryParse(newVal, out int n) || n <= 0)
                 {
-                    MessageBox.Show("Numer fazy musi być dodatnią liczbą całkowitą.");
+                    MessageBox.Show("Phase number must be a positive integer.");
                     CancelCellEdit(); return;
                 }
                 _editingItem.Text = newVal;
@@ -668,7 +953,7 @@ namespace TeklaPhaseManager_4
                 Phase target = null;
                 foreach (Phase p in phases)
                 {
-                    if (p.PhaseNumber == newNum && p.PhaseNumber != originalNum) { MessageBox.Show("Faza o podanym numerze już istnieje."); return false; }
+                    if (p.PhaseNumber == newNum && p.PhaseNumber != originalNum) { MessageBox.Show("Phase number already exists."); return false; }
                     if (p.PhaseNumber == originalNum) target = p;
                 }
                 if (target == null) return false;
@@ -699,8 +984,8 @@ namespace TeklaPhaseManager_4
             string attrPath = Path.Combine(_model.GetInfo().ModelPath, "attributes");
             if (!Directory.Exists(attrPath)) Directory.CreateDirectory(attrPath);
 
-            var phaseData    = new List<KeyValuePair<int, Color>>();
-            var allNums      = new List<int>();
+            var phaseData     = new List<KeyValuePair<int, Color>>();
+            var allNums       = new List<int>();
             var phaseRepTrans = new Dictionary<int, int>();
 
             foreach (ListViewItem item in _allItems)
@@ -712,7 +997,7 @@ namespace TeklaPhaseManager_4
                 if (TryParseStoredColor(colorId, out Color col))
                     phaseData.Add(new KeyValuePair<int, Color>(phaseNum, col));
 
-                string tLabel = item.SubItems.Count > 5 ? item.SubItems[5].Text : "jak jest";
+                string tLabel = item.SubItems.Count > 5 ? item.SubItems[5].Text : "as is";
                 phaseRepTrans[phaseNum] = _transLabelToRepVal.ContainsKey(tLabel) ? _transLabelToRepVal[tLabel] : 10;
             }
 
@@ -732,7 +1017,6 @@ namespace TeklaPhaseManager_4
                 File.WriteAllText(Path.Combine(attrPath, $"+TPM_F_{phase.Key}.PObjGrp"), sb.ToString(), Encoding.Default);
             }
 
-            // VObjGrp visibility
             var visPhases = new List<int>();
             foreach (ListViewItem item in _allItems)
                 if (item.SubItems.Count > 4 && IsVisibleCellValue(item.SubItems[4].Text) && int.TryParse(item.Text, out int vn))
@@ -749,7 +1033,6 @@ namespace TeklaPhaseManager_4
             vobj.Append("}\r\n");
             File.WriteAllText(Path.Combine(attrPath, "+TPM_widocznosc.VObjGrp"), vobj.ToString(), Encoding.Default);
 
-            // .rep file
             var rep = new StringBuilder();
             rep.Append("REPRESENTATIONS \r\n{\r\n    Version= 1.04 \r\n");
             rep.Append($"    Count= {phaseData.Count + 1} \r\n");
@@ -782,34 +1065,48 @@ namespace TeklaPhaseManager_4
             {
                 if (_model == null || !_model.GetConnectionStatus()) return;
                 _model.CommitChanges();
-                TryRedrawTeklaViews();
+                WriteTeklaRedrawMacro();
+                Tekla.Structures.Model.Operations.Operation.RunMacro("+TeklaRedrawView.cs");
             }
             catch { }
         }
 
-        private void TryRedrawTeklaViews()
+        private void WriteTeklaRedrawMacro()
         {
             try
             {
-                Type vh = Type.GetType("Tekla.Structures.Model.UI.ViewHandler, Tekla.Structures.Model.UI");
-                if (vh == null) return;
-                var setRep = vh.GetMethod("SetRepresentation", new[] { typeof(string) });
-                if (setRep != null) setRep.Invoke(null, new object[] { "+TPM_kolory" });
-                var redraw = vh.GetMethod("RedrawViews");
-                if (redraw != null) { redraw.Invoke(null, null); return; }
-                var getViews  = vh.GetMethod("GetVisibleViews");
-                var redrawOne = vh.GetMethods().FirstOrDefault(m => m.Name == "RedrawView" && m.GetParameters().Length == 1);
-                if (getViews == null || redrawOne == null) return;
-                object en = getViews.Invoke(null, null);
-                if (en == null) return;
-                var moveNext = en.GetType().GetMethod("MoveNext");
-                var current  = en.GetType().GetProperty("Current");
-                if (moveNext == null || current == null) return;
-                while ((bool)moveNext.Invoke(en, null))
-                {
-                    object view = current.GetValue(en, null);
-                    if (view != null) redrawOne.Invoke(null, new[] { view });
-                }
+                string macroDir = _model.GetInfo().ModelPath;
+                if (!Directory.Exists(macroDir)) Directory.CreateDirectory(macroDir);
+
+                string content =
+                    "using System;\r\n" +
+                    "using Tekla.Structures.Model;\r\n" +
+                    "using Tekla.Structures.Model.UI;\r\n" +
+                    "\r\n" +
+                    "public class TeklaRedrawView\r\n" +
+                    "{\r\n" +
+                    "    public static void Run(Tekla.Structures.Model.Operations.Operation op)\r\n" +
+                    "    {\r\n" +
+                    "        try\r\n" +
+                    "        {\r\n" +
+                    "            ViewHandler.SetRepresentation(\"+TPM_kolory\");\r\n" +
+                    "            ModelViewEnumerator views = ViewHandler.GetAllViews();\r\n" +
+                    "            while (views.MoveNext())\r\n" +
+                    "            {\r\n" +
+                    "                View view = views.Current;\r\n" +
+                    "                view.ViewFilter = \"+TPM_widocznosc\";\r\n" +
+                    "                view.Modify();\r\n" +
+                    "                ViewHandler.RedrawView(view);\r\n" +
+                    "            }\r\n" +
+                    "        }\r\n" +
+                    "        catch { }\r\n" +
+                    "    }\r\n" +
+                    "}\r\n";
+
+                File.WriteAllText(
+                    Path.Combine(macroDir, "+TeklaRedrawView.cs"),
+                    content,
+                    Encoding.Default);
             }
             catch { }
         }
@@ -841,12 +1138,12 @@ namespace TeklaPhaseManager_4
         {
             switch (v)
             {
-                case 10: return "widoczne";
+                case 10: return "visible";
                 case 5:  return "50%";
                 case 3:  return "70%";
                 case 1:  return "90%";
-                case 0:  return "ukryty";
-                default: return "jak jest";
+                case 0:  return "hidden";
+                default: return "as is";
             }
         }
 
@@ -903,7 +1200,6 @@ namespace TeklaPhaseManager_4
                     Path.Combine(attrPath, "+TPM_widocznosc.VObjGrp"),
                     Path.Combine(attrPath, "+TPM_widocznosc.PObjGrp")
                 }.FirstOrDefault(File.Exists);
-
                 if (string.IsNullOrEmpty(visPath)) return result;
                 string[] lines = File.ReadAllLines(visPath, Encoding.Default);
                 for (int i = 0; i < lines.Length; i++)
@@ -922,10 +1218,8 @@ namespace TeklaPhaseManager_4
             return -1;
         }
 
-        private int FindColorIndexByColorRef(int colorRef)
-        {
-            return FindColorIndexByRGB(colorRef & 0xFF, (colorRef >> 8) & 0xFF, (colorRef >> 16) & 0xFF);
-        }
+        private int FindColorIndexByColorRef(int colorRef) =>
+            FindColorIndexByRGB(colorRef & 0xFF, (colorRef >> 8) & 0xFF, (colorRef >> 16) & 0xFF);
 
         private Color ColorFromColorRef(int colorRef) =>
             Color.FromArgb(colorRef & 0xFF, (colorRef >> 8) & 0xFF, (colorRef >> 16) & 0xFF);
@@ -959,11 +1253,10 @@ namespace TeklaPhaseManager_4
 
         private void UpdatePinButtonAppearance()
         {
-            btnPin.BackColor = this.TopMost ? _darkAccent : _darkSurface;
-            btnPin.ForeColor = Color.White;
+            btnPin.BackColor = this.TopMost ? Color.FromArgb(0, 120, 212) : DkBtnBg;
+            btnPin.ForeColor = this.TopMost ? Color.White : DkText;
+            btnPin.FlatAppearance.BorderColor = this.TopMost ? Color.FromArgb(0, 90, 170) : DkBorder;
         }
-
-        private void btnRefreshTeklaView_Click(object sender, EventArgs e) => AutoRefreshTeklaView();
 
         private void btnOpenPhaseManager_Click(object sender, EventArgs e)
         {
@@ -973,90 +1266,86 @@ namespace TeklaPhaseManager_4
 
         private void listViewPhases_SelectedIndexChanged(object sender, EventArgs e) { }
 
-        // ── Unused legacy handlers kept for compatibility ──────────────────
-        private void btnUpdateFiles_Click(object sender, EventArgs e) => SaveFiles();
-        private void btnAdd_Click(object sender, EventArgs e)
+        // ── Dark renderers ───────────────────────────────────────────────────
+        private void ApplyDarkContextMenu(ContextMenuStrip menu)
         {
-            int next = 1;
-            foreach (ListViewItem li in listViewPhases.Items)
-                if (int.TryParse(li.Text, out int ex) && ex >= next) next = ex + 1;
-            Phase p = new Phase { PhaseNumber = next, PhaseName = "Nowa faza", PhaseComment = "" };
-            if (p.Insert()) { _model.CommitChanges(); btnLoad_Click(null, null); }
+            menu.Renderer  = new DarkContextRenderer();
+            menu.BackColor = DkCtxBg;
+            menu.ForeColor = DkText;
+            ApplyDarkMenuItems(menu.Items);
         }
-        private void btnDelete_Click(object sender, EventArgs e)
+
+        private void ApplyDarkMenuItems(System.Windows.Forms.ToolStripItemCollection items)
         {
-            if (listViewPhases.SelectedItems.Count == 0) return;
-            if (int.TryParse(listViewPhases.SelectedItems[0].Text, out int num))
+            foreach (System.Windows.Forms.ToolStripItem item in items)
             {
-                foreach (Phase p in _model.GetPhases()) { if (p.PhaseNumber == num) { p.Delete(); break; } }
-                _model.CommitChanges(); btnLoad_Click(null, null);
+                item.BackColor = DkCtxBg;
+                item.ForeColor = DkText;
+                if (item is ToolStripMenuItem mi && mi.HasDropDownItems)
+                    ApplyDarkMenuItems(mi.DropDownItems);
             }
         }
-        private int MapManagerToTekla(string c) => int.TryParse(c, out int v) ? v : -1;
 
-        // ── Dark menu renderer ────────────────────────────────────────────────
-        private class DarkMenuRenderer : ToolStripProfessionalRenderer
+        private class DarkStripRenderer : ToolStripProfessionalRenderer
         {
-            public DarkMenuRenderer() : base(new DarkColorTable()) { }
+            public DarkStripRenderer() : base(new ProfessionalColorTable()) { }
+            protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { }
+            protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+            {
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(235, 235, 235)))
+                    e.Graphics.FillRectangle(b, e.AffectedBounds);
+            }
+        }
+
+        private class DarkContextRenderer : ToolStripProfessionalRenderer
+        {
+            private static readonly Color Bg  = Color.FromArgb(255, 255, 255);
+            private static readonly Color Sel = Color.FromArgb(204, 228, 247);
+            private static readonly Color Brd = Color.FromArgb(180, 180, 180);
+            private static readonly Color Txt = Color.FromArgb(15,  15,  15);
+            private static readonly Color Dim = Color.FromArgb(150, 150, 150);
+
+            public DarkContextRenderer() : base(new ProfessionalColorTable()) { RoundedEdges = false; }
 
             protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
             {
-                Color bg = e.Item.Selected ? Color.FromArgb(0, 122, 204) : Color.FromArgb(62, 62, 66);
-                using (SolidBrush b = new SolidBrush(bg))
+                Color c = e.Item.Selected && e.Item.Enabled ? Sel : Bg;
+                using (SolidBrush b = new SolidBrush(c))
                     e.Graphics.FillRectangle(b, new Rectangle(Point.Empty, e.Item.Size));
             }
-
-            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
-            {
-                e.TextColor = Color.FromArgb(240, 240, 240);
-                base.OnRenderItemText(e);
-            }
-
             protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
             {
-                using (SolidBrush b = new SolidBrush(Color.FromArgb(62, 62, 66)))
-                    e.Graphics.FillRectangle(b, e.AffectedBounds);
+                using (SolidBrush b = new SolidBrush(Bg)) e.Graphics.FillRectangle(b, e.AffectedBounds);
             }
-
+            protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+            {
+                using (Pen p = new Pen(Brd))
+                    e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+            }
             protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
             {
                 int y = e.Item.Height / 2;
-                using (Pen p = new Pen(Color.FromArgb(80, 80, 80)))
-                    e.Graphics.DrawLine(p, 0, y, e.Item.Width, y);
+                using (Pen p = new Pen(Brd)) e.Graphics.DrawLine(p, 28, y, e.Item.Width - 4, y);
             }
-        }
-
-        private class DarkColorTable : ProfessionalColorTable
-        {
-            public override Color ToolStripDropDownBackground   => Color.FromArgb(62, 62, 66);
-            public override Color MenuBorder                    => Color.FromArgb(80, 80, 80);
-            public override Color MenuItemBorder                => Color.FromArgb(0, 122, 204);
-            public override Color MenuItemSelected              => Color.FromArgb(0, 122, 204);
-            public override Color ImageMarginGradientBegin      => Color.FromArgb(50, 50, 50);
-            public override Color ImageMarginGradientMiddle     => Color.FromArgb(50, 50, 50);
-            public override Color ImageMarginGradientEnd        => Color.FromArgb(50, 50, 50);
-            public override Color SeparatorDark                 => Color.FromArgb(80, 80, 80);
-            public override Color SeparatorLight                => Color.FromArgb(80, 80, 80);
-            public override Color CheckBackground               => Color.FromArgb(0, 122, 204);
-            public override Color CheckSelectedBackground       => Color.FromArgb(0, 100, 180);
-            public override Color CheckPressedBackground        => Color.FromArgb(0, 100, 180);
-        }
-
-        // ── Dark status strip renderer ────────────────────────────────────────
-        private class DarkStatusRenderer : ToolStripProfessionalRenderer
-        {
-            public DarkStatusRenderer() : base(new DarkStatusColorTable()) { }
-            protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
             {
-                using (SolidBrush b = new SolidBrush(Color.FromArgb(30, 30, 30)))
+                e.TextColor = e.Item.Enabled ? Txt : Dim;
+                base.OnRenderItemText(e);
+            }
+            protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
+            {
+                e.ArrowColor = Color.FromArgb(170, 170, 195);
+                base.OnRenderArrow(e);
+            }
+            protected override void OnRenderImageMargin(ToolStripRenderEventArgs e)
+            {
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(240, 240, 240)))
                     e.Graphics.FillRectangle(b, e.AffectedBounds);
             }
         }
 
-        private class DarkStatusColorTable : ProfessionalColorTable
-        {
-            public override Color StatusStripGradientBegin => Color.FromArgb(30, 30, 30);
-            public override Color StatusStripGradientEnd   => Color.FromArgb(30, 30, 30);
-        }
+        // ── Unused legacy stubs ──────────────────────────────────────────────
+        private void btnUpdateFiles_Click(object sender, EventArgs e) => SaveFiles();
+        private int MapManagerToTekla(string c) => int.TryParse(c, out int v) ? v : -1;
     }
 }
