@@ -64,8 +64,8 @@ TPM will call it automatically via `Operation.RunMacro()` after applying changes
 ---
 
 ## Screenshots
+<img width="400" height="400" alt="Screenshot_3" src="https://github.com/user-attachments/assets/fd29a81c-7065-4b6b-9fbf-a5fbca7f6a2a" />
 
-![Main window](screenshots/main.png)
 
 ---
 
